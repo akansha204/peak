@@ -1,0 +1,72 @@
+package com.akansha.peak_server.service;
+
+import com.akansha.peak_server.grpc.ClientEvent;
+import com.akansha.peak_server.grpc.LeaderboardServiceGrpc;
+import com.akansha.peak_server.grpc.ServerEvent;
+import com.akansha.peak_server.redis.LeaderboardRedisService;
+import io.grpc.stub.StreamObserver;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.data.redis.core.ZSetOperations;
+import org.springframework.grpc.server.service.GrpcService;
+import com.akansha.peak_server.grpc.LeaderboardSnapshot;
+import com.akansha.peak_server.grpc.LeaderboardEntry;
+
+import java.util.Set;
+
+@GrpcService
+public class LeaderBoardGrpcService extends LeaderboardServiceGrpc.LeaderboardServiceImplBase {
+    @Autowired
+    private LeaderboardRedisService leaderboardRedisService;
+
+    @Override
+    public StreamObserver<ClientEvent> streamLeaderboard(StreamObserver<ServerEvent> responseObserver) {
+        return new StreamObserver<ClientEvent>() {
+            @Override
+            public void onNext(ClientEvent clientEvent){
+                if(clientEvent.getPayloadCase() == ClientEvent.PayloadCase.JOIN){
+                    sendSnapshot(responseObserver);
+                } else if(clientEvent.getPayloadCase() == ClientEvent.PayloadCase.SCOREUPDATE){
+                    leaderboardRedisService.updateScore(
+                            clientEvent.getScoreUpdate().getUserId(),
+                            clientEvent.getScoreUpdate().getScore()
+                    );
+                    sendSnapshot(responseObserver);
+                }
+            }
+
+            @Override
+            public void onError(Throwable throwable) {
+                System.out.println("Error in client stream: " + throwable.getMessage());
+            }
+            @Override
+            public void onCompleted() {
+                responseObserver.onCompleted();
+            }
+        };
+
+    }
+    private void sendSnapshot(StreamObserver<ServerEvent> responseObserver){
+        Set<ZSetOperations.TypedTuple<String>> players = leaderboardRedisService.getTopPlayers(10);
+
+        LeaderboardSnapshot.Builder snapshotBuilder = LeaderboardSnapshot.newBuilder();
+
+        int rank = 1;
+        if(players != null){
+            for(ZSetOperations.TypedTuple<String> player : players){
+                snapshotBuilder.addEntries(
+                        LeaderboardEntry.newBuilder()
+                                .setUserId(player.getValue())
+                                .setScore(player.getScore().longValue())
+                                .setRank(rank++)
+                                .build()
+                );
+            }
+        }
+        responseObserver.onNext(
+                ServerEvent.newBuilder()
+                        .setSnapshot(snapshotBuilder.build())
+                        .build()
+        );
+    }
+
+}
